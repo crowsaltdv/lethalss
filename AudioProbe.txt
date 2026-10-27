@@ -1,0 +1,6 @@
+sample: 60 of 1309 clips, source bytes 2834 KB
+q0.00 preserve-rate        -> 1651 KB encoded
+q0.05 22050                -> 12 KB encoded
+q0.30 16000 (build 10)     -> 0 KB encoded
+q0.00 11025                -> 0 KB encoded
+q0.00 8000                 -> 0 KB encoded
