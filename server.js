@@ -1,15 +1,21 @@
-// Serves the WebGL build in ./WebBuild on http://127.0.0.1:8080/ (this computer only). No dependencies, just Node.js.
-//   node server.js            start the server
-//   node server.js --open     start it and open the game in your default browser
-//   node server.js 9000       use another port
+// Serves the WebGL build in ./WebBuild. No dependencies, just Node.js.
+//   node server.js              listen on 0.0.0.0:8080 (this computer and other devices on your local network)
+//   node server.js --local      listen on 127.0.0.1 only (this computer only)
+//   node server.js --open       also open the game in your default browser
+//   node server.js 9000         use another port
+//   node server.js --host=192.168.1.20   listen on one specific address
+// Make sure the port is not forwarded to the internet: the build contains the game's assets.
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { exec } = require('child_process');
 
 const ROOT = path.join(__dirname, 'WebBuild');
-const PORT = parseInt(process.argv.find((a) => /^\d+$/.test(a)) || '8080', 10);
-const HOST = '127.0.0.1';
+const PORT = parseInt(process.argv.find((a) => /^\d+$/.test(a)) || process.env.PORT || '8080', 10);
+const hostArg = process.argv.find((a) => a.startsWith('--host='));
+const HOST = process.argv.includes('--local') ? '127.0.0.1' : hostArg ? hostArg.slice(7) : process.env.HOST || '0.0.0.0';
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript',
@@ -51,13 +57,31 @@ const server = http.createServer((req, res) => {
       res.writeHead(404);
       return res.end('Not found');
     }
-    // Unity can pre-compress the build (.br = Brotli, .gz = gzip): send those with the matching Content-Encoding
-    let typeName = file;
-    const headers = { 'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes' };
+    const headers = { 'Cache-Control': 'no-store' };
     const ext = path.extname(file).toLowerCase();
-    if (ext === '.br') { headers['Content-Encoding'] = 'br'; typeName = file.slice(0, -3); }
-    else if (ext === '.gz') { headers['Content-Encoding'] = 'gzip'; typeName = file.slice(0, -3); }
+    let typeName = file;
+    let precompressed = null;
+    if (ext === '.br') { precompressed = 'br'; typeName = file.slice(0, -3); }
+    else if (ext === '.gz') { precompressed = 'gzip'; typeName = file.slice(0, -3); }
     headers['Content-Type'] = TYPES[path.extname(typeName).toLowerCase()] || 'application/octet-stream';
+
+    // Browsers only accept Brotli over https or localhost. A page opened through a LAN address (plain http) does not
+    // advertise "br", so for those clients the file is decompressed on the fly and sent as plain bytes.
+    const accepted = String(req.headers['accept-encoding'] || '');
+    const clientCanDecode = precompressed && new RegExp('\\b' + precompressed + '\\b').test(accepted);
+    if (precompressed && !clientCanDecode) {
+      res.writeHead(200, headers);
+      if (req.method === 'HEAD') return res.end();
+      const src = fs.createReadStream(file);
+      const dec = precompressed === 'br' ? zlib.createBrotliDecompress() : zlib.createGunzip();
+      src.on('error', () => res.destroy());
+      dec.on('error', () => res.destroy());
+      res.on('close', () => { src.destroy(); dec.destroy(); });
+      return src.pipe(dec).pipe(res);
+    }
+    if (precompressed) headers['Content-Encoding'] = precompressed;
+    headers['Accept-Ranges'] = 'bytes';
+
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
     let start = 0;
     let end = stat.size - 1;
@@ -88,7 +112,7 @@ const server = http.createServer((req, res) => {
 
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
-    console.error('Port ' + PORT + ' is already in use. If the game server is already running, just open http://' + HOST + ':' + PORT + '/ ;');
+    console.error('Port ' + PORT + ' is already in use. If the game server is already running, just open http://127.0.0.1:' + PORT + '/ ;');
     console.error('otherwise pick another port, e.g.  node server.js 9000');
   } else {
     console.error(e);
@@ -97,8 +121,15 @@ server.on('error', (e) => {
 });
 
 server.listen(PORT, HOST, () => {
-  const url = 'http://' + HOST + ':' + PORT + '/';
   console.log('Serving ' + ROOT);
-  console.log('Open ' + url + ' in Chrome or Edge.  (Ctrl+C to stop)');
-  if (process.argv.includes('--open')) exec('start "" "' + url + '"');
+  console.log('Listening on ' + HOST + ':' + PORT + '   (Ctrl+C to stop)');
+  console.log('  this computer:   http://127.0.0.1:' + PORT + '/');
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    const nets = os.networkInterfaces();
+    Object.keys(nets).forEach((name) => nets[name].forEach((n) => {
+      if (n.family === 'IPv4' && !n.internal) console.log('  local network:   http://' + n.address + ':' + PORT + '/   (' + name + ')');
+    }));
+    console.log('Windows may ask to allow Node.js through the firewall: allow it for private networks only.');
+  }
+  if (process.argv.includes('--open')) exec('start "" "http://127.0.0.1:' + PORT + '/"');
 });
